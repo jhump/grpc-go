@@ -358,6 +358,7 @@ func NewServer(opt ...ServerOption) *Server {
 		opts:   opts,
 		conns:  make(map[io.Closer]bool),
 		m:      make(map[string]*service),
+		info:   make(map[string]*ServiceInfo),
 		quit:   make(chan struct{}),
 		done:   make(chan struct{}),
 		czData: new(channelzData),
@@ -1230,7 +1231,7 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 	}
 	// Unknown service, or known server unknown method.
 	if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
-		s.processStreamingRPC(t, stream, nil, unknownDesc, trInfo)
+		s.processStreamingRPC(t, stream, nil, nil, unknownDesc, trInfo)
 		return
 	}
 	if trInfo != nil {
