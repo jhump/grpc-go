@@ -810,6 +810,7 @@ const (
 	SupportPackageIsVersion3 = true
 	SupportPackageIsVersion4 = true
 	SupportPackageIsVersion5 = true
+	SupportPackageIsVersion6 = true
 )
 
 const grpcUA = "grpc-go/" + Version

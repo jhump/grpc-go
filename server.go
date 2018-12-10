@@ -93,8 +93,9 @@ type Server struct {
 	conns  map[io.Closer]bool
 	serve  bool
 	drain  bool
-	cv     *sync.Cond          // signaled when connections close for GracefulStop
-	m      map[string]*service // service name -> service info
+	cv     *sync.Cond             // signaled when connections close for GracefulStop
+	m      map[string]*service    // service name -> service details
+	info   map[string]*ServiceInfo // service name -> service info
 	events trace.EventLog
 
 	quit               chan struct{}
@@ -426,50 +427,24 @@ func (s *Server) register(sd *ServiceDesc, ss interface{}) {
 		srv.sd[d.StreamName] = d
 	}
 	s.m[sd.ServiceName] = srv
-}
 
-// MethodInfo contains the information of an RPC including its method name and type.
-type MethodInfo struct {
-	// Name is the method name only, without the service name or package name.
-	Name string
-	// IsClientStream indicates whether the RPC is a client streaming RPC.
-	IsClientStream bool
-	// IsServerStream indicates whether the RPC is a server streaming RPC.
-	IsServerStream bool
-}
-
-// ServiceInfo contains unary RPC method info, streaming RPC method info and metadata for a service.
-type ServiceInfo struct {
-	Methods []MethodInfo
-	// Metadata is the metadata specified in ServiceDesc when registering service.
-	Metadata interface{}
+	si := ServiceInfoForDesc(sd)
+	s.info[sd.ServiceName] = &si
 }
 
 // GetServiceInfo returns a map from service names to ServiceInfo.
 // Service names include the package names, in the form of <package>.<service>.
 func (s *Server) GetServiceInfo() map[string]ServiceInfo {
-	ret := make(map[string]ServiceInfo)
-	for n, srv := range s.m {
-		methods := make([]MethodInfo, 0, len(srv.md)+len(srv.sd))
-		for m := range srv.md {
-			methods = append(methods, MethodInfo{
-				Name:           m,
-				IsClientStream: false,
-				IsServerStream: false,
-			})
-		}
-		for m, d := range srv.sd {
-			methods = append(methods, MethodInfo{
-				Name:           m,
-				IsClientStream: d.ClientStreams,
-				IsServerStream: d.ServerStreams,
-			})
-		}
+	// TODO: this does not acquire s.mu to read s.info but maybe should? (also,
+	// processing an RPC doens't bother with the mutex to read s.mu, so likely
+	// instead just need to document when and where it is safe to call this...
 
-		ret[n] = ServiceInfo{
-			Methods:  methods,
-			Metadata: srv.mdata,
-		}
+	// create a defensive copy
+	ret := make(map[string]ServiceInfo, len(s.info))
+	for n, srv := range s.info {
+		clone := *srv
+		clone.Methods = append([]MethodInfo(nil), clone.Methods...)
+		ret[n] = clone
 	}
 	return ret
 }
@@ -823,7 +798,7 @@ func (s *Server) sendResponse(t transport.ServerTransport, stream *transport.Str
 	return err
 }
 
-func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.Stream, srv *service, md *MethodDesc, trInfo *traceInfo) (err error) {
+func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.Stream, srv *service, si *ServiceInfo, md *MethodDesc, trInfo *traceInfo) (err error) {
 	if channelz.IsOn() {
 		s.incrCallsStarted()
 		defer func() {
@@ -963,6 +938,7 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 		return nil
 	}
 	ctx := NewContextWithServerTransportStream(stream.Context(), stream)
+	ctx = NewContextWithServiceInfo(ctx, si)
 	reply, appErr := md.Handler(srv.server, ctx, df, s.opts.unaryInt)
 	if appErr != nil {
 		appStatus, ok := status.FromError(appErr)
@@ -1055,7 +1031,7 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 	return err
 }
 
-func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transport.Stream, srv *service, sd *StreamDesc, trInfo *traceInfo) (err error) {
+func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transport.Stream, srv *service, si *ServiceInfo, sd *StreamDesc, trInfo *traceInfo) (err error) {
 	if channelz.IsOn() {
 		s.incrCallsStarted()
 		defer func() {
@@ -1085,6 +1061,7 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 		}()
 	}
 	ctx := NewContextWithServerTransportStream(stream.Context(), stream)
+	ctx = NewContextWithServiceInfo(ctx, si)
 	ss := &serverStream{
 		ctx:                   ctx,
 		t:                     t,
@@ -1241,12 +1218,13 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 	method := sm[pos+1:]
 
 	if srv, ok := s.m[service]; ok {
+		si := s.info[service]
 		if md, ok := srv.md[method]; ok {
-			s.processUnaryRPC(t, stream, srv, md, trInfo)
+			s.processUnaryRPC(t, stream, srv, si, md, trInfo)
 			return
 		}
 		if sd, ok := srv.sd[method]; ok {
-			s.processStreamingRPC(t, stream, srv, sd, trInfo)
+			s.processStreamingRPC(t, stream, srv, si, sd, trInfo)
 			return
 		}
 	}
