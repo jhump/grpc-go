@@ -148,7 +148,7 @@ type serverHandlerTransport struct {
 	timeoutSet bool
 	timeout    time.Duration
 
-	headerMD metadata.MD
+	headerMD metadata.MD // incoming request metadata
 
 	peer peer.Peer
 
@@ -231,14 +231,22 @@ func (ht *serverHandlerTransport) writeStatus(s *ServerStream, st *status.Status
 
 	headersWritten := s.updateHeaderSent()
 	err := ht.do(func() {
+		var trailersOnly bool
 		if !headersWritten {
-			ht.writePendingHeaders(s)
+			// If there are no custom headers, we can send a trailers-only response
+			// and include the status in the headers (instead of separate in trailers).
+			s.hdrMu.Lock()
+			trailersOnly = len(s.header) == 0
+			s.hdrMu.Unlock()
+			ht.writePendingHeaders(s, trailersOnly)
 		}
 
-		// And flush, in case no header or body has been sent yet.
-		// This forces a separation of headers and trailers if this is the
-		// first call (for example, in end2end tests's TestNoService).
-		ht.rw.(http.Flusher).Flush()
+		if !trailersOnly {
+			// Flush in case no body has been sent yet.
+			// This forces a separation of headers and trailers if this is the
+			// first call (for example, in end2end tests's TestNoService).
+			ht.rw.(http.Flusher).Flush()
+		}
 
 		h := ht.rw.Header()
 		h.Set("Grpc-Status", fmt.Sprintf("%d", st.Code()))
@@ -266,9 +274,13 @@ func (ht *serverHandlerTransport) writeStatus(s *ServerStream, st *status.Status
 					continue
 				}
 				for _, v := range vv {
-					// http2 ResponseWriter mechanism to send undeclared Trailers after
-					// the headers have possibly been written.
-					h.Add(http2.TrailerPrefix+k, encodeMetadataHeader(k, v))
+					hdrName := k
+					if !trailersOnly {
+						// http2 ResponseWriter mechanism to send undeclared Trailers after
+						// the headers have possibly been written.
+						hdrName = http2.TrailerPrefix + k
+					}
+					h.Add(hdrName, encodeMetadataHeader(k, v))
 				}
 			}
 		}
@@ -289,26 +301,30 @@ func (ht *serverHandlerTransport) writeStatus(s *ServerStream, st *status.Status
 
 // writePendingHeaders sets common and custom headers on the first
 // write call (Write, WriteHeader, or WriteStatus)
-func (ht *serverHandlerTransport) writePendingHeaders(s *ServerStream) {
-	ht.writeCommonHeaders(s)
+func (ht *serverHandlerTransport) writePendingHeaders(s *ServerStream, writingStatus bool) {
+	ht.writeCommonHeaders(s, writingStatus)
 	ht.writeCustomHeaders(s)
 }
 
 // writeCommonHeaders sets common headers on the first write
 // call (Write, WriteHeader, or WriteStatus).
-func (ht *serverHandlerTransport) writeCommonHeaders(s *ServerStream) {
+func (ht *serverHandlerTransport) writeCommonHeaders(s *ServerStream, writingStatus bool) {
 	h := ht.rw.Header()
 	h["Date"] = nil // suppress Date to make tests happy; TODO: restore
 	h.Set("Content-Type", ht.contentType)
 
-	// Predeclare trailers we'll set later in WriteStatus (after the body).
+	// If we are not writing the status with these headers, then we need to
+	// predeclare these as trailers. They'll be set laterin WriteStatus
+	// (after the body).
 	// This is a SHOULD in the HTTP RFC, and the way you add (known)
 	// Trailers per the net/http.ResponseWriter contract.
 	// See https://golang.org/pkg/net/http/#ResponseWriter
 	// and https://golang.org/pkg/net/http/#example_ResponseWriter_trailers
-	h.Add("Trailer", "Grpc-Status")
-	h.Add("Trailer", "Grpc-Message")
-	h.Add("Trailer", "Grpc-Status-Details-Bin")
+	if !writingStatus {
+		h.Add("Trailer", "Grpc-Status")
+		h.Add("Trailer", "Grpc-Message")
+		h.Add("Trailer", "Grpc-Status-Details-Bin")
+	}
 
 	if s.sendCompress != "" {
 		h.Set("Grpc-Encoding", s.sendCompress)
@@ -342,9 +358,9 @@ func (ht *serverHandlerTransport) write(s *ServerStream, hdr []byte, data mem.Bu
 	err := ht.do(func() {
 		defer data.Free()
 		if !headersWritten {
-			ht.writePendingHeaders(s)
+			ht.writePendingHeaders(s, false)
 		}
-		ht.rw.Write(hdr)
+		_, _ = ht.rw.Write(hdr)
 		for _, b := range data {
 			_, _ = ht.rw.Write(b.ReadOnlyData())
 		}
@@ -365,7 +381,7 @@ func (ht *serverHandlerTransport) writeHeader(s *ServerStream, md metadata.MD) e
 	headersWritten := s.updateHeaderSent()
 	err := ht.do(func() {
 		if !headersWritten {
-			ht.writePendingHeaders(s)
+			ht.writePendingHeaders(s, false)
 		}
 
 		ht.rw.WriteHeader(200)

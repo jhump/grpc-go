@@ -351,13 +351,10 @@ func handleStreamCloseBodyTest(t *testing.T, statusCode codes.Code, msg string) 
 	wantHeader := http.Header{
 		"Date":         nil,
 		"Content-Type": {"application/grpc"},
-		"Trailer":      {"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"},
-	}
-	wantTrailer := http.Header{
 		"Grpc-Status":  {fmt.Sprint(uint32(statusCode))},
 		"Grpc-Message": {encodeGrpcMessage(msg)},
 	}
-	checkHeaderAndTrailer(t, st.rw, wantHeader, wantTrailer)
+	checkHeaderAndTrailer(t, st.rw, wantHeader, nil)
 }
 
 func (s) TestHandlerTransport_HandleStreams_Timeout(t *testing.T) {
@@ -400,13 +397,10 @@ func (s) TestHandlerTransport_HandleStreams_Timeout(t *testing.T) {
 	wantHeader := http.Header{
 		"Date":         nil,
 		"Content-Type": {"application/grpc"},
-		"Trailer":      {"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"},
-	}
-	wantTrailer := http.Header{
 		"Grpc-Status":  {"4"},
 		"Grpc-Message": {encodeGrpcMessage("too slow")},
 	}
-	checkHeaderAndTrailer(t, rw, wantHeader, wantTrailer)
+	checkHeaderAndTrailer(t, rw, wantHeader, nil)
 }
 
 // TestHandlerTransport_HandleStreams_MultiWriteStatus ensures that
@@ -483,17 +477,13 @@ func (s) TestHandlerTransport_HandleStreams_ErrDetails(t *testing.T) {
 		context.Background(), func(s *ServerStream) { go handleStream(s) },
 	)
 	wantHeader := http.Header{
-		"Date":         nil,
-		"Content-Type": {"application/grpc"},
-		"Trailer":      {"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"},
-	}
-	wantTrailer := http.Header{
+		"Date":                    nil,
+		"Content-Type":            {"application/grpc"},
 		"Grpc-Status":             {fmt.Sprint(uint32(statusCode))},
 		"Grpc-Message":            {encodeGrpcMessage(msg)},
 		"Grpc-Status-Details-Bin": {encodeBinHeader(stBytes)},
 	}
-
-	checkHeaderAndTrailer(t, hst.rw, wantHeader, wantTrailer)
+	checkHeaderAndTrailer(t, hst.rw, wantHeader, nil)
 }
 
 // TestHandlerTransport_Drain verifies that Drain() is not implemented
